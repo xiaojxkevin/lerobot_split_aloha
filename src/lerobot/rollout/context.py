@@ -50,6 +50,7 @@ from lerobot.inference import (
     validate_local_chunk_policy,
 )
 from lerobot.policies import (
+    PiWSConfig,
     PreTrainedPolicy,
     get_policy_class,
     make_pre_post_processors,
@@ -517,7 +518,14 @@ def build_rollout_context(
             "Please use `cpu` or `cuda` backend."
         )
 
-    policy = _load_pretrained_policy(policy_config)
+    pi_ws = None
+    if isinstance(policy_config, PiWSConfig):
+        from lerobot.policies.pi_ws.modeling_pi_ws import PiWSPolicy
+
+        pi_ws = PiWSPolicy(policy_config)
+        policy: PreTrainedPolicy = pi_ws
+    else:
+        policy = _load_pretrained_policy(policy_config)
 
     if is_rtc:
         validate_local_chunk_policy(policy)
@@ -667,6 +675,8 @@ def build_rollout_context(
         _attach_planner(cfg, inference_strategy, robot_wrapper, preprocessor, policy_config)
 
         # Keep hardware closed while loading resources that may block robot control threads.
+        if pi_ws is not None:
+            pi_ws.connect()
         hardware = _connect_rollout_hardware(robot_wrapper, teleop)
 
         logger.info("Rollout context assembled successfully")
@@ -688,6 +698,8 @@ def build_rollout_context(
             ),
         )
     except BaseException:
+        if pi_ws is not None:
+            pi_ws.close()
         # Also before connecting: a sim robot holds its simulator from construction.
         _disconnect_setup_hardware(robot, hardware.teleop if hardware is not None else teleop)
         if dataset is not None:

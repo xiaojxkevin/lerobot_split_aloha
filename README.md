@@ -1,43 +1,98 @@
-<p align="center">
-  <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
-</p>
+# LeRobot for AgileX Split-aloha (piperx + ranger mini 3.0)
 
-<div align="center">
+## Split-ALOHA client setup
 
-[![Tests](https://github.com/huggingface/lerobot/actions/workflows/latest_deps_tests.yml/badge.svg?branch=main)](https://github.com/huggingface/lerobot/actions/workflows/latest_deps_tests.yml?query=branch%3Amain)
-[![Tests](https://github.com/huggingface/lerobot/actions/workflows/docker_publish.yml/badge.svg?branch=main)](https://github.com/huggingface/lerobot/actions/workflows/docker_publish.yml?query=branch%3Amain)
-[![Python versions](https://img.shields.io/pypi/pyversions/lerobot)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/huggingface/lerobot/blob/main/LICENSE)
-[![Status](https://img.shields.io/pypi/status/lerobot)](https://pypi.org/project/lerobot/)
-[![Version](https://img.shields.io/pypi/v/lerobot)](https://pypi.org/project/lerobot/)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v2.1-ff69b4.svg)](https://github.com/huggingface/lerobot/blob/main/CODE_OF_CONDUCT.md)
-[![Discord](https://img.shields.io/badge/Discord-Join_Us-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/s3KuuzsPFb)
-
-</div>
-
-**LeRobot** aims to provide models, datasets, and tools for real-world robotics in PyTorch. The goal is to lower the barrier to entry so that everyone can contribute to and benefit from shared datasets and pretrained models.
-
-🤗 A hardware-agnostic, Python-native interface that standardizes control across diverse platforms, from low-cost arms (SO-100) to humanoids.
-
-🤗 A standardized, scalable LeRobotDataset format (Parquet + MP4 or images) hosted on the Hugging Face Hub, enabling efficient storage, streaming and visualization of massive robotic datasets.
-
-🤗 State-of-the-art policies that have been shown to transfer to the real-world ready for training and deployment.
-
-🤗 Comprehensive support for the open-source ecosystem to democratize physical AI.
-
-## Quick Start
-
-LeRobot can be installed directly from PyPI.
+From the repository root, install the Python 3.12 environment and client dependencies.
 
 ```bash
-pip install lerobot
-lerobot-info
+uv sync --locked --python 3.12 \
+  --extra dataset --extra intelrealsense --extra pyserial-dep
+
+uv pip install --python .venv/bin/python \
+  'git+https://github.com/agilexrobotics/pyAgxArm.git' \
+  'websockets==15.0.1' 'msgpack>=1.1,<2'
+
+uv pip install --python .venv/bin/python --no-deps -e ./openpi-client
 ```
 
-The base install is lightweight. Add the extras you need, for example `pip install 'lerobot[dataset]'` to load datasets, `'lerobot[training]'` to train policies, or `'lerobot[core_scripts,feetech]'` to record with an SO-101 arm.
+The bundled OpenPI client's package metadata pins NumPy 1.x. Its WebSocket codec
+works with the NumPy 2.x version locked by this repo. Use `uv run --no-sync`
+for the commands below. If you run `uv sync` again, repeat the extra installs
+and any PyTorch override.
 
-> [!IMPORTANT]
-> For detailed installation guide, please see the [Installation Documentation](https://huggingface.co/docs/lerobot/installation).
+For an RTX 4060 host with a working NVIDIA 570-series driver, install the
+CUDA 12.8 GPU wheels after the locked sync. On a host where the default locked
+CUDA build can allocate a CUDA tensor, keep that build.
+
+```bash
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+uv pip install --python .venv/bin/python \
+  --index https://download.pytorch.org/whl/cu128 \
+  'torch==2.11.0+cu128' 'torchvision==0.26.0+cu128'
+```
+
+`git submodule update --init third_party/curobo` checks out the project's cuRobo fork.
+Install with:
+
+```bash
+uv pip install --python .venv/bin/python \
+  'https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0%2Bcu12-py3-none-manylinux_2_28_x86_64.whl' \
+  -e 'third_party/curobo[cu12]'
+```
+
+### Piper-X control and deployment
+
+The CAN and lift utilities live under [scripts/split-aloha](scripts/split-aloha).
+`piper_sdk/init_can.sh` under that directory sets up the two follower interfaces.
+Leader recording also needs separate Linux CAN interfaces for the two leaders.
+
+`bi_piperx_follower` provides absolute left/right joint targets in radians, with
+six joints and one gripper field per side. The gripper fields retain the D4RT
+training encoding `width_m * 1000 * pi / 180` and the SDK receives metres.
+Override `--robot.left_arm_config.firmware` and
+`--robot.right_arm_config.firmware` to match the controller's
+[pyAgxArm firmware profile](https://github.com/agilexrobotics/pyAgxArm/blob/master/docs/piper/firmware_reference.md).
+
+For a hardware test, replay the same small joint trajectory using
+`lerobot-replay` with each command mode. The default is
+`--robot.joint_command=move_j`. To select `move_js`, set
+`--robot.joint_command=move_js`. The follower clips joint and gripper targets
+to their configured travel. Compare the two runs at the same rate and initial pose.
+Rollout can refresh the last target in `move_j` mode during a brief RTC gap.
+For `move_js`, an exhausted RTC queue ends the rollout.
+
+For leader capture use `lerobot-record --robot.type=bi_piperx_follower
+--teleop.type=bi_piperx_leader` with the usual dataset and camera options.
+The default leader ports are `can_left_main` and `can_right_main`.
+Configure the two controllers in leader mode on their own buses before recording.
+The adapter reads the SDK's leader joint angles and gripper width command.
+
+The following rollout command **enables the followers and executes model targets**.
+Set the endpoint and camera serials for your station. Start the matching
+RTC-trained joint checkpoint with `serve_d4rt_vla.py` on the inference host.
+
+```bash
+D4RT_ENDPOINT=ws://your-policy-host:8888
+FRONT_SERIAL=your-front-serial
+LEFT_SERIAL=your-left-wrist-serial
+RIGHT_SERIAL=your-right-wrist-serial
+
+uv run --no-sync lerobot-rollout \
+  --robot.type=bi_piperx_follower \
+  --robot.cameras="{fixed_front: {type: intelrealsense, serial_number_or_name: '$FRONT_SERIAL', width: 640, height: 480, fps: 30}, left_arm: {type: intelrealsense, serial_number_or_name: '$LEFT_SERIAL', width: 640, height: 480, fps: 30}, right_arm: {type: intelrealsense, serial_number_or_name: '$RIGHT_SERIAL', width: 640, height: 480, fps: 30}}" \
+  --policy.type=pi_ws --policy.endpoint="$D4RT_ENDPOINT" \
+  --policy.rtc_training_max_delay=10 \
+  --inference.type=rtc --inference.rtc.mode=trained \
+  --inference.rtc.execution_horizon=16 \
+  --fps=30 --task='Fold the towel.' --return_to_initial_position=false
+```
+
+PiWS maps the three observation keys to `cam_high`, `cam_left_wrist` and
+`cam_right_wrist`. It checks the server metadata before opening the CAN ports.
+Training-time RTC sends an absolute `action_prefix[d,14]` and `rtc_delay=d`;
+set `rtc_training_max_delay` to a value supported by the checkpoint. For a
+synchronous baseline with a non-RTC server, use `--inference.type=sync` and
+`--policy.rtc_training_max_delay=0`.
 
 ## Robots & Control
 
@@ -187,15 +242,3 @@ If you are referencing our research or the academic paper, please also cite our 
 ```
 
 </details>
-
-## Contribute
-
-We welcome contributions from everyone in the community! To get started, please read our [CONTRIBUTING.md](https://github.com/huggingface/lerobot/blob/main/CONTRIBUTING.md) guide. Whether you're adding a new feature, improving documentation, or fixing a bug, your help and feedback are invaluable. We're incredibly excited about the future of open-source robotics and can't wait to work with you on what's next—thank you for your support!
-
-<p align="center">
-  <img alt="SO101 Video" src="./media/readme/so100_video.webp" width="640px">
-</p>
-
-<div align="center">
-<sub>Built by the <a href="https://huggingface.co/lerobot">LeRobot</a> team at <a href="https://huggingface.co">Hugging Face</a> with ❤️</sub>
-</div>

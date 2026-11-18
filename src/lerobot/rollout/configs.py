@@ -439,7 +439,7 @@ class RolloutConfig:
             )
             self.policy.pretrained_path = policy_path
         if self.policy is None and not remote:
-            raise ValueError("--policy.path is required for rollout")
+            raise ValueError("--policy.path is required for rollout (or select --policy.type=pi_ws)")
 
         # --- Task resolution ---
         # When any --dataset.* flag is passed, draccus creates a DatasetRecordConfig with single_task="".

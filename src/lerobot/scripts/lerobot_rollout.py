@@ -177,6 +177,7 @@ from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
     bi_openarm_follower,
+    bi_piperx_follower,
     bi_rebot_b601_follower,
     bi_so_follower,
     bi_yam_follower,
@@ -205,6 +206,7 @@ from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_openarm_mini,
+    bi_piperx_leader,
     bi_rebot_102_leader,
     bi_so_leader,
     homunculus,
@@ -272,9 +274,15 @@ def rollout(cfg: RolloutConfig):
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     finally:
-        strategy.teardown(ctx)
-        if cfg.display_data:
-            shutdown_visualization(cfg.display_mode)
+        try:
+            strategy.teardown(ctx)
+        finally:
+            from lerobot.policies.pi_ws.modeling_pi_ws import PiWSPolicy
+
+            if isinstance(ctx.policy.policy, PiWSPolicy):
+                ctx.policy.policy.close()
+            if cfg.display_data:
+                shutdown_visualization(cfg.display_mode)
 
     failure = session.controller if session is not None else ctx.policy.inference
     if failure.failed:

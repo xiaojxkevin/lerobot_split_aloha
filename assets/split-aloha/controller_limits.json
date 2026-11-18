@@ -1,0 +1,9 @@
+{
+  "firmware_profile": "v189",
+  "joint_max_speed_rad_s": 3.0,
+  "joint_max_acceleration_rad_s2": 5.0,
+  "flange_max_linear_velocity_m_s": 1.0,
+  "flange_max_angular_velocity_rad_s": 0.26,
+  "flange_max_linear_acceleration_m_s2": 1.0,
+  "flange_max_angular_acceleration_rad_s2": 0.4
+}
