@@ -14,3 +14,10 @@ calibration ranges and the selected pyAgxArm driver's limits, pass
 `--robot.follower_calibration_dir=assets/split-aloha/calibration`. This narrows
 each accepted joint range to the intersection. Gripper travel remains configured
 in metres via `gripper_max_width_m` per arm.
+
+## Leader calibration records
+
+The joint limits are stored in millidegrees. Sealab's single-arm `piper_leader`
+selects the corresponding record by calibration directory and arm ID.
+The current `bi_piperx_leader` adapter reads absolute SDK positions without
+applying these calibration ranges.

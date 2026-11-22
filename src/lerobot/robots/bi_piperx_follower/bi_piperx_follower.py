@@ -1,113 +1,28 @@
-import json
 import math
-import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from functools import cached_property
-from pathlib import Path
 from typing import Any
 
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.lerobot_types import RobotAction, RobotObservation
+from lerobot.piperx import ACTION_KEYS, LEGACY_GRIPPER_PER_METER, PiperXArm
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
-from lerobot.utils.import_utils import _pyagxarm_available
 
 from ..robot import Robot
-from .config_bi_piperx_follower import (
-    ACTION_KEYS,
-    ARM_ACTION_KEYS,
-    LEGACY_GRIPPER_PER_METER,
-    BiPiperXFollowerConfig,
-    PiperArmConfig,
-    PiperFirmware,
-)
+from .config_bi_piperx_follower import BiPiperXFollowerConfig
 from .controller_limits import PiperControllerLimits
 
 
-class PiperArm:
-    """Single Piper-X CAN connection using absolute joint angles and gripper width."""
+class PiperArm(PiperXArm):
+    """Read measured follower feedback and send follower joint targets."""
 
-    def __init__(self, config: PiperArmConfig, max_feedback_age: float) -> None:
-        self.config = config
-        self.max_feedback_age = max_feedback_age
-        self.driver: Any = None
-        self.gripper: Any = None
-        self.limits: list[tuple[float, float]] = []
-
-    def connect(
-        self,
-        resources: ExitStack,
-        calibration_file: Path | None = None,
-        firmware_profile: PiperFirmware = "default",
-    ) -> None:
-        if not _pyagxarm_available:
-            raise ImportError("Install pyAgxArm using the Split-ALOHA setup in README.md.")
-        from pyAgxArm import AgxArmFactory, ArmModel, create_agx_arm_config
-
-        config = create_agx_arm_config(
-            ArmModel.PIPER_X,
-            firmeware_version=self.config.firmware or firmware_profile,
-            channel=self.config.port,
-            interface="socketcan",
-            auto_connect=False,
-        )
-        self.limits = [tuple(config["joint_limits"][f"joint{index}"]) for index in range(1, 7)]
-        if calibration_file is not None:
-            with calibration_file.open() as file:
-                calibration = json.load(file)
-            for index, key in enumerate(ARM_ACTION_KEYS[:6]):
-                entry = calibration[key]
-                if entry["homing_offset"] != 0 or entry["drive_mode"] != 0:
-                    raise ValueError(f"{calibration_file}: {key} requires zero offset and drive_mode=0.")
-                minimum = math.radians(entry["range_min"] / 1000)
-                maximum = math.radians(entry["range_max"] / 1000)
-                sdk_min, sdk_max = self.limits[index]
-                lower, upper = max(minimum, sdk_min), min(maximum, sdk_max)
-                if not math.isfinite(minimum) or not math.isfinite(maximum) or lower >= upper:
-                    raise ValueError(f"{calibration_file}: invalid limits for {key}.")
-                self.limits[index] = (lower, upper)
-        self.driver = AgxArmFactory.create_arm(config)
-        resources.callback(self.driver.disconnect)
-        self.driver.connect()
-        self.gripper = self.driver.init_effector(self.driver.OPTIONS.EFFECTOR.AGX_GRIPPER)
-
-    def enable(self, timeout_s: float) -> None:
-        deadline = time.monotonic() + timeout_s
-        while not self.driver.enable():
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"{self.config.port}: Piper-X did not confirm enable.")
-            time.sleep(0.02)
-        self.driver.set_speed_percent(self.config.speed_percent)
-
-    def _feedback(self, message: Any, name: str) -> Any:
-        if message is None or message.msg is None:
-            raise RuntimeError(f"{self.config.port}: missing {name} feedback.")
-        age = time.time() - message.timestamp
-        if not 0 <= age <= self.max_feedback_age:
-            raise RuntimeError(f"{self.config.port}: stale {name} feedback ({age:.3f}s).")
-        return message.msg
-
-    def observe(self, *, leader: bool = False) -> list[float]:
-        if leader:
-            joint_message = self.driver.get_leader_joint_angles()
-            joint_prefix = "leader_"
-            gripper = self._feedback(self.gripper.get_gripper_ctrl_states(), "leader gripper")
-            if gripper.status_code != 1:
-                raise RuntimeError(f"{self.config.port}: expected a leader gripper width command (status 1).")
-        else:
-            joint_message = self.driver.get_joint_angles()
-            joint_prefix = ""
-            gripper = self._feedback(self.gripper.get_gripper_status(), "gripper")
-            if gripper.mode != "width":
-                raise RuntimeError(f"{self.config.port}: expected width-mode gripper feedback.")
-        joints = self._feedback(joint_message, "joint")
-        # The aggregate timestamp refers to only the last received pair.
-        for pair in ("joint_12", "joint_34", "joint_56"):
-            self._feedback(getattr(self.driver._parser, joint_prefix + pair, None), pair)
-        values = [*map(float, joints), float(gripper.value) * LEGACY_GRIPPER_PER_METER]
-        if len(values) != len(ARM_ACTION_KEYS) or not all(map(math.isfinite, values)):
-            raise RuntimeError(f"{self.config.port}: invalid Piper-X feedback.")
-        return values
+    def observe(self) -> list[float]:
+        gripper = self._feedback(self.gripper.get_gripper_status(), "gripper")
+        if gripper.mode != "width":
+            raise RuntimeError(f"{self.config.port}: expected width-mode gripper feedback.")
+        width = self._gripper_width(gripper.value)
+        return [*self.get_joint_positions(), width]
 
     def get_replay_feedback(self) -> dict[str, Any]:
         """Read optional diagnostic samples from the SDK's receive cache."""

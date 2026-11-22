@@ -91,6 +91,7 @@ lerobot-record \\
 
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pprint import pformat
 
@@ -137,6 +138,7 @@ from lerobot.robots import (  # noqa: F401
     yam_follower,
 )
 from lerobot.robots.utils import check_control_rate, episode_ended, start_episode
+from lerobot.scripts.piperx_demonstration import PiperXDemonstration, uses_piperx_demonstration
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -195,13 +197,14 @@ class RecordConfig:
     # Resume recording on an existing dataset.
     resume: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.teleop is None:
             raise ValueError(
                 "A teleoperator is required for recording. "
                 "Use --teleop.type=... to specify one. "
                 "For policy-based deployment, use lerobot-rollout instead."
             )
+        uses_piperx_demonstration(self.robot, self.teleop, dataset=self.dataset)
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -252,6 +255,7 @@ def record_loop(
     display_mode: str = "rerun",
     display_compressed_images: bool = False,
     timer: CycleTimer | None = None,
+    demonstration: PiperXDemonstration | None = None,
 ) -> None:
     """Drive the robot from the teleoperator at *fps*, optionally recording each frame.
 
@@ -361,11 +365,9 @@ def record_loop(
             continue
 
         with timer.section("send"):
-            # Send action to robot
-            # Action can eventually be clipped using `max_relative_target`,
-            # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-            # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-            _sent_action = robot.send_action(robot_action_to_send)
+            sent_action = robot.send_action(robot_action_to_send)
+            if demonstration is not None:
+                action_values = sent_action
 
         # Write to dataset
         if dataset is not None:
@@ -414,6 +416,11 @@ def record(
     robot = make_robot_from_config(cfg.robot)
     check_control_rate(robot, cfg.dataset.fps, "--dataset.fps")
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+    demonstration = None
+    if uses_piperx_demonstration(cfg.robot, cfg.teleop, dataset=cfg.dataset):
+        assert isinstance(robot, bi_piperx_follower.BiPiperXFollower)
+        assert isinstance(teleop, bi_piperx_leader.BiPiperXLeader)
+        demonstration = PiperXDemonstration(robot, teleop)
 
     # Fall back to identity pipelines when the caller doesn't supply processors.
     if (
@@ -511,32 +518,9 @@ def record(
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 episode_index = dataset.num_episodes
-                start_episode(robot)
-                log_say(f"Recording episode {episode_index}", cfg.play_sounds)
-                record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=cfg.dataset.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    dataset=dataset,
-                    control_time_s=cfg.dataset.episode_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
-                    display_mode=cfg.display_mode,
-                    display_compressed_images=display_compressed_images,
-                    timer=timer,
-                )
-
-                # Execute a few seconds without recording to give time to manually reset the environment
-                # Skip reset for the last episode to be recorded
-                if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                ):
-                    log_say("Reset the environment", cfg.play_sounds)
-
+                with demonstration.episode() if demonstration is not None else nullcontext():
+                    start_episode(robot)
+                    log_say(f"Recording episode {episode_index}", cfg.play_sounds)
                     record_loop(
                         robot=robot,
                         events=events,
@@ -545,12 +529,40 @@ def record(
                         robot_action_processor=robot_action_processor,
                         robot_observation_processor=robot_observation_processor,
                         teleop=teleop,
-                        control_time_s=cfg.dataset.reset_time_s,
+                        dataset=dataset,
+                        control_time_s=cfg.dataset.episode_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,
+                        timer=timer,
+                        demonstration=demonstration,
                     )
+
+                # Execute a few seconds without recording to give time to manually reset the environment
+                # Skip reset for the last episode to be recorded
+                if not events["stop_recording"] and (
+                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                ):
+                    log_say("Reset the environment", cfg.play_sounds)
+
+                    if demonstration is not None:
+                        demonstration.wait_for_scene_reset(events, cfg.dataset.reset_time_s)
+                    else:
+                        record_loop(
+                            robot=robot,
+                            events=events,
+                            fps=cfg.dataset.fps,
+                            teleop_action_processor=teleop_action_processor,
+                            robot_action_processor=robot_action_processor,
+                            robot_observation_processor=robot_observation_processor,
+                            teleop=teleop,
+                            control_time_s=cfg.dataset.reset_time_s,
+                            single_task=cfg.dataset.single_task,
+                            display_data=cfg.display_data,
+                            display_mode=cfg.display_mode,
+                            display_compressed_images=display_compressed_images,
+                        )
 
                 if events["rerecord_episode"]:
                     log_say("Re-record episode", cfg.play_sounds)
@@ -561,6 +573,9 @@ def record(
                     timer.restart()
                     continue
 
+                if demonstration is not None and not dataset.has_pending_frames():
+                    timer.restart()
+                    continue
                 dataset.save_episode()
                 recorded_episodes += 1
                 # Close the window on the episode just saved.  The digest is emitted on
@@ -577,7 +592,7 @@ def record(
 
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
-        if dataset:
+        if dataset is not None:
             dataset.finalize()
 
         if robot.is_connected:

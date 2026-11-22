@@ -71,13 +71,16 @@ lerobot-teleoperate \
 
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pprint import pformat
+from typing import TYPE_CHECKING
 
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.cameras.zmq import ZMQCameraConfig  # noqa: F401
 from lerobot.configs import parser
+from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.processor import (
     RobotAction,
     RobotObservation,
@@ -106,6 +109,7 @@ from lerobot.robots import (  # noqa: F401
     yam_follower,
 )
 from lerobot.robots.utils import check_control_rate, episode_ended, start_episode
+from lerobot.scripts.piperx_demonstration import PiperXDemonstration, uses_piperx_demonstration
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -129,12 +133,21 @@ from lerobot.teleoperators import (  # noqa: F401
 )
 from lerobot.utils.cycle_timer import CycleTimer
 from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import (
     init_visualization,
     log_visualization_data,
     shutdown_visualization,
 )
+
+if TYPE_CHECKING:
+    from lerobot.datasets import LeRobotDataset
+
+
+@dataclass
+class TeleoperationDatasetConfig(DatasetRecordConfig):
+    push_to_hub: bool = False
 
 
 @dataclass
@@ -156,6 +169,18 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
+    # If supplied, record the Piper-X demonstration instead of running live-only.
+    dataset: TeleoperationDatasetConfig | None = None
+    resume: bool = False
+
+    def __post_init__(self) -> None:
+        if self.dataset is not None:
+            if not uses_piperx_demonstration(self.robot, self.teleop, dataset=self.dataset):
+                raise ValueError("Use lerobot-record for recording outside Piper-X MIT demonstration.")
+            if self.teleop_time_s is not None:
+                raise ValueError("Use --dataset.episode_time_s to set recording duration.")
+        elif self.resume:
+            raise ValueError("--resume requires a dataset configuration.")
 
 
 def teleop_loop(
@@ -169,7 +194,8 @@ def teleop_loop(
     display_mode: str = "rerun",
     duration: float | None = None,
     display_compressed_images: bool = False,
-):
+    events: dict[str, bool] | None = None,
+) -> None:
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
     pipelines, sends them to a robot, and optionally displays the robot's state. The loop runs at a
@@ -197,6 +223,8 @@ def teleop_loop(
     start = time.perf_counter()
     try:
         while True:
+            if events is not None and events["exit_early"]:
+                return
             timer.tick()
             loop_start = time.perf_counter()  # for the live readout below
 
@@ -261,7 +289,25 @@ def teleop_loop(
 
 
 @parser.wrap()
-def teleoperate(cfg: TeleoperateConfig):
+def teleoperate(cfg: TeleoperateConfig) -> "LeRobotDataset | None":
+    if cfg.dataset is not None:
+        from lerobot.scripts.lerobot_record import RecordConfig, record
+
+        return record(
+            RecordConfig(
+                robot=cfg.robot,
+                teleop=cfg.teleop,
+                dataset=cfg.dataset,
+                display_data=cfg.display_data,
+                display_mode=cfg.display_mode,
+                display_ip=cfg.display_ip,
+                display_port=cfg.display_port,
+                display_compressed_images=cfg.display_compressed_images,
+                play_sounds=False,
+                resume=cfg.resume,
+            )
+        )
+
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -278,30 +324,42 @@ def teleoperate(cfg: TeleoperateConfig):
     robot = make_robot_from_config(cfg.robot)
     check_control_rate(robot, cfg.fps, "--fps")
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
-
-    teleop.connect()
-    robot.connect()
+    demonstration = None
+    if uses_piperx_demonstration(cfg.robot, cfg.teleop):
+        assert isinstance(robot, bi_piperx_follower.BiPiperXFollower)
+        assert isinstance(teleop, bi_piperx_leader.BiPiperXLeader)
+        demonstration = PiperXDemonstration(robot, teleop)
 
     try:
-        teleop_loop(
-            teleop=teleop,
-            robot=robot,
-            fps=cfg.fps,
-            display_data=cfg.display_data,
-            display_mode=cfg.display_mode,
-            duration=cfg.teleop_time_s,
-            teleop_action_processor=teleop_action_processor,
-            robot_action_processor=robot_action_processor,
-            robot_observation_processor=robot_observation_processor,
-            display_compressed_images=display_compressed_images,
-        )
+        with ExitStack() as resources:
+            teleop.connect()
+            resources.callback(teleop.disconnect)
+            robot.connect()
+            resources.callback(robot.disconnect)
+            events = None
+            if demonstration is not None:
+                listener, events = init_keyboard_listener()
+                if listener is not None:
+                    resources.callback(listener.stop)
+                resources.enter_context(demonstration.episode())
+            teleop_loop(
+                teleop=teleop,
+                robot=robot,
+                fps=cfg.fps,
+                display_data=cfg.display_data,
+                display_mode=cfg.display_mode,
+                duration=cfg.teleop_time_s,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                robot_observation_processor=robot_observation_processor,
+                display_compressed_images=display_compressed_images,
+                events=events,
+            )
     except KeyboardInterrupt:
         pass
     finally:
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
-        teleop.disconnect()
-        robot.disconnect()
 
 
 def main():

@@ -4,31 +4,18 @@ from pathlib import Path
 from typing import Literal
 
 from lerobot.cameras import CameraConfig
+from lerobot.piperx import (
+    ACTION_KEYS,
+    ARM_ACTION_KEYS as ARM_ACTION_KEYS,
+    JOINT_NAMES as JOINT_NAMES,
+    LEGACY_GRIPPER_PER_METER as LEGACY_GRIPPER_PER_METER,
+    PiperArmConfig as PiperArmConfig,
+    PiperFirmware as PiperFirmware,
+)
 
 from ..config import RobotConfig
 
-JOINT_NAMES = tuple(f"joint_{index}" for index in range(1, 7))
-ARM_ACTION_KEYS = (*(f"{name}.pos" for name in JOINT_NAMES), "gripper.pos")
-ACTION_KEYS = tuple(f"{side}_{key}" for side in ("left", "right") for key in ARM_ACTION_KEYS)
-LEGACY_GRIPPER_PER_METER = 1000 * math.pi / 180
 DEFAULT_CONTROLLER_LIMITS = Path(__file__).resolve().parents[4] / "assets/split-aloha/controller_limits.json"
-PiperFirmware = Literal["default", "v183", "v188", "v189"]
-
-
-@dataclass(kw_only=True)
-class PiperArmConfig:
-    port: str | None = None
-    firmware: PiperFirmware | None = None
-    speed_percent: int = 100
-    gripper_max_width_m: float = 0.1
-
-    def __post_init__(self) -> None:
-        if self.port is not None and not self.port.strip():
-            raise ValueError("The CAN port must not be empty.")
-        if not 1 <= self.speed_percent <= 100:
-            raise ValueError("speed_percent must be in [1, 100].")
-        if not math.isfinite(self.gripper_max_width_m) or self.gripper_max_width_m <= 0:
-            raise ValueError("gripper_max_width_m must be finite and positive.")
 
 
 @RobotConfig.register_subclass("bi_piperx_follower")
