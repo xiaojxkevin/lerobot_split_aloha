@@ -109,8 +109,8 @@ fi
 if [ "$EXPECTED_CAN_COUNT" -ne 1 ]; then
     declare -A USB_PORTS 
     USB_PORTS["1-6.4.3:1.0"]="can_right_main:1000000"
-    USB_PORTS["1-12:1.0"]="can_right_slave:1000000"
-    USB_PORTS["1-13:1.0"]="can_left_slave:1000000"
+    USB_PORTS["1-2:1.0"]="can_right_slave:1000000"
+    USB_PORTS["1-1:1.0"]="can_left_slave:1000000"
     USB_PORTS["1-6.4.4:1.0"]="can_left_main:1000000"
     # USB_PORTS["1-13.2:1.0"]="can_right_main:1000000"
     # USB_PORTS["1-13.4.1:1.0"]="can_right_slave:1000000"

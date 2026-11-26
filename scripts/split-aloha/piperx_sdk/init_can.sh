@@ -8,7 +8,7 @@ declare -A USB_BY_TARGET=(
     [can_left_main]="1-6.4.4:1.0"
     [can_right_main]="1-6.4.3:1.0"
     [can_left_slave]="1-1:1.0"
-    [can_right_slave]="1-12:1.0"
+    [can_right_slave]="1-2:1.0"
 )
 FOLLOWERS_ONLY=false
 INTERFACES_ONLY=false
@@ -23,7 +23,7 @@ Configure the four Sealab CAN interfaces at 1 Mbps by USB bus-info:
   can_left_main    1-6.4.4:1.0
   can_right_main   1-6.4.3:1.0
   can_left_slave   1-1:1.0
-  can_right_slave  1-12:1.0
+  can_right_slave  1-2:1.0
 
 By default, also set both leader controllers to CAN control and verify their
 feedback. Mode changes require all six motors on the affected arm to be disabled.
